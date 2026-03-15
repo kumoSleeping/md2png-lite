@@ -1,0 +1,47 @@
+[project]
+name = "md2png-lite"
+version = "0.1.0"
+description = "Browser-free Markdown to PNG renderer in pure Python"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+dependencies = [
+    "markdown-it-py>=3.0.0",
+    "mdit-py-plugins>=0.4.0",
+    "Pillow",
+    "Pygments",
+    "matplotlib",
+    "fonttools",
+    "httpx",
+]
+
+[project.optional-dependencies]
+NotoSans = [
+    "filelock>=3.16.0",
+    "platformdirs>=4.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/kumosleeping/md2png-lite"
+Repository = "https://github.com/kumosleeping/md2png-lite"
+Issues = "https://github.com/kumosleeping/md2png-lite/issues"
+
+[project.scripts]
+md2png-lite = "md2png_lite.cli:main"
+md2png-lite-font-routes = "md2png_lite.run_font_routes:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/md2png_lite"]
+include = [
+    "src/md2png_lite/assets/**/*",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/md2png_lite/assets/**/*",
+    "licenses/*.txt",
+]

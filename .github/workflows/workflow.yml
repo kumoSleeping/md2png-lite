@@ -1,0 +1,172 @@
+name: Publish md2png-lite to PyPI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - README.md
+      - README_zh.md
+      - LICENSE
+      - examples/**
+      - scripts/**
+      - src/**
+      - pyproject.toml
+      - .github/workflows/workflow.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  detect-release:
+    runs-on: ubuntu-latest
+    outputs:
+      project_name: ${{ steps.release.outputs.project_name }}
+      should_publish: ${{ steps.release.outputs.should_publish }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Decide whether to publish
+        id: release
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import tomllib
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          project_name = str(pyproject["project"]["name"]).strip()
+          version = str(pyproject["project"]["version"]).strip()
+          event_name = str(os.environ.get("GITHUB_EVENT_NAME") or "").strip()
+
+          project_name_changed = event_name == "workflow_dispatch"
+          version_changed = event_name == "workflow_dispatch"
+          metadata_changed = event_name == "workflow_dispatch"
+          previous_project_name = ""
+          previous_version = ""
+
+          if not metadata_changed:
+              try:
+                  previous_text = subprocess.check_output(
+                      ["git", "show", "HEAD^:pyproject.toml"],
+                      text=True,
+                  )
+                  previous_pyproject = tomllib.loads(previous_text)
+                  previous_project_name = str(
+                      previous_pyproject["project"]["name"]
+                  ).strip()
+                  previous_version = str(previous_pyproject["project"]["version"]).strip()
+                  project_name_changed = previous_project_name != project_name
+                  version_changed = previous_version != version
+                  metadata_changed = project_name_changed or version_changed
+              except Exception:
+                  project_name_changed = True
+                  version_changed = True
+                  metadata_changed = True
+
+          already_published = False
+          try:
+              with urllib.request.urlopen(
+                  f"https://pypi.org/pypi/{project_name}/{version}/json",
+                  timeout=10,
+              ) as response:
+                  already_published = response.status == 200
+          except urllib.error.HTTPError as exc:
+              if exc.code != 404:
+                  raise
+
+          needs_first_publish = not already_published
+          should_publish = bool(project_name) and bool(version) and (
+              metadata_changed or needs_first_publish
+          ) and not already_published
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as fh:
+              fh.write(f"project_name={project_name}\n")
+              fh.write(f"previous_project_name={previous_project_name}\n")
+              fh.write(f"version={version}\n")
+              fh.write(f"previous_version={previous_version}\n")
+              fh.write(
+                  f"project_name_changed={'true' if project_name_changed else 'false'}\n"
+              )
+              fh.write(f"version_changed={'true' if version_changed else 'false'}\n")
+              fh.write(f"metadata_changed={'true' if metadata_changed else 'false'}\n")
+              fh.write(f"already_published={'true' if already_published else 'false'}\n")
+              fh.write(f"needs_first_publish={'true' if needs_first_publish else 'false'}\n")
+              fh.write(f"should_publish={'true' if should_publish else 'false'}\n")
+          PY
+
+      - name: Write release summary
+        run: |
+          {
+            echo "## Release decision"
+            echo ""
+            echo "- Project: \`${{ steps.release.outputs.project_name }}\`"
+            echo "- Version: \`${{ steps.release.outputs.version }}\`"
+            echo "- Previous project: \`${{ steps.release.outputs.previous_project_name || 'N/A' }}\`"
+            echo "- Previous version: \`${{ steps.release.outputs.previous_version || 'N/A' }}\`"
+            echo "- Project name changed: \`${{ steps.release.outputs.project_name_changed }}\`"
+            echo "- Version changed: \`${{ steps.release.outputs.version_changed }}\`"
+            echo "- Metadata changed: \`${{ steps.release.outputs.metadata_changed }}\`"
+            echo "- Already published on PyPI: \`${{ steps.release.outputs.already_published }}\`"
+            echo "- Needs first publish: \`${{ steps.release.outputs.needs_first_publish }}\`"
+            echo "- Should publish: \`${{ steps.release.outputs.should_publish }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: detect-release
+    if: needs.detect-release.outputs.should_publish == 'true'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build backend
+        run: python -m pip install --upgrade build
+
+      - name: Build distribution artifacts
+        run: python -m build
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  publish:
+    runs-on: ubuntu-latest
+    needs:
+      - detect-release
+      - build
+    if: needs.detect-release.outputs.should_publish == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
