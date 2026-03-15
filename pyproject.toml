@@ -1,6 +1,6 @@
 [project]
 name = "md2png-lite"
-version = "0.1.0"
+version = "0.1.1"
 description = "Browser-free Markdown to PNG renderer in pure Python"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -42,6 +42,7 @@ include = [
 
 [tool.hatch.build.targets.sdist]
 include = [
+    "src/md2png_lite/**/*.py",
     "src/md2png_lite/assets/**/*",
     "licenses/*.txt",
 ]
