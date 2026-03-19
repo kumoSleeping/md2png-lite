@@ -472,7 +472,7 @@ class PillowMarkdownRenderer:
         box_y = y + int(8 * self.scale)
         if image is not None:
             paste_x = x + max(0, (width - rendered.image.width) // 2)
-            image.paste(rendered.image, (paste_x, box_y), rendered.image)
+            self._composite_image(image, rendered.image, paste_x, box_y)
         return box_y + rendered.image.height + int(20 * self.scale)
 
     def _render_image_block(self, block: ImageBlock, *, image: Image.Image | None, x: int, y: int, width: int) -> int:
@@ -493,7 +493,7 @@ class PillowMarkdownRenderer:
         target = self._scale_image(loaded, width=width, max_height=int(560 * self.scale))
         if image is not None:
             paste_x = x + max(0, (width - target.width) // 2)
-            image.paste(target, (paste_x, y), target)
+            self._composite_image(image, target, paste_x, y)
         cursor_y = y + target.height
         if block.alt:
             cursor_y = self._render_rich_text_block(
@@ -1024,7 +1024,7 @@ class PillowMarkdownRenderer:
             for run in line.runs:
                 top = baseline_y - run.ascent
                 if run.kind == "image" and run.image is not None:
-                    image.paste(run.image, (cursor_x, top), run.image)
+                    self._composite_image(image, run.image, cursor_x, top)
                 elif run.font is not None:
                     if run.background:
                         draw.rounded_rectangle(
@@ -1089,7 +1089,7 @@ class PillowMarkdownRenderer:
             for run in line.runs:
                 top = baseline_y - run.ascent
                 if run.kind == "image" and run.image is not None:
-                    image.paste(run.image, (cursor_x, top), run.image)
+                    self._composite_image(image, run.image, cursor_x, top)
                 elif run.font is not None:
                     if run.background:
                         draw.rounded_rectangle(
@@ -1288,6 +1288,24 @@ class PillowMarkdownRenderer:
             return src
         return src.resize((target_width, target_height), Image.Resampling.LANCZOS)
 
+    @staticmethod
+    def _composite_image(base: Image.Image, overlay: Image.Image, x: int, y: int) -> None:
+        if overlay.width <= 0 or overlay.height <= 0:
+            return
+        if base.mode == "RGBA" and overlay.mode == "RGBA":
+            left = max(0, int(x))
+            top = max(0, int(y))
+            right = min(base.width, int(x) + overlay.width)
+            bottom = min(base.height, int(y) + overlay.height)
+            if right <= left or bottom <= top:
+                return
+            src_box = (left - int(x), top - int(y), right - int(x), bottom - int(y))
+            source = overlay if src_box == (0, 0, overlay.width, overlay.height) else overlay.crop(src_box)
+            base.alpha_composite(source, dest=(left, top))
+            return
+        mask = overlay if "A" in overlay.getbands() else None
+        base.paste(overlay, (int(x), int(y)), mask)
+
     def _append_text_runs(
         self,
         target: list[_Run],
@@ -1419,7 +1437,7 @@ class PillowMarkdownRenderer:
         for run in content_runs:
             top = baseline_y - run.ascent
             if run.kind == "image" and run.image is not None:
-                canvas.paste(run.image, (cursor_x, top), run.image)
+                self._composite_image(canvas, run.image, cursor_x, top)
             elif run.font is not None:
                 draw.text((cursor_x, top), run.text, font=run.font, fill=run.fill or self.theme.inline_code_foreground)
             cursor_x += run.width
@@ -1674,12 +1692,12 @@ class PillowMarkdownRenderer:
         cursor_x = 0
         if prefix_render is not None:
             prefix_y = max(0, (total_height - prefix_render.image.height) // 2)
-            canvas.paste(prefix_render.image, (cursor_x, prefix_y), prefix_render.image)
+            self._composite_image(canvas, prefix_render.image, cursor_x, prefix_y)
             cursor_x += prefix_render.image.width + prefix_gap
 
         if brace_render is not None:
             brace_y = max(0, (total_height - brace_render.image.height) // 2)
-            canvas.paste(brace_render.image, (cursor_x, brace_y), brace_render.image)
+            self._composite_image(canvas, brace_render.image, cursor_x, brace_y)
             cursor_x += brace_render.image.width + gap_x
 
         rows_x = cursor_x
@@ -1687,10 +1705,10 @@ class PillowMarkdownRenderer:
         for (left_render, right_render), row_height in zip(rendered_rows, row_heights, strict=False):
             if left_render is not None:
                 left_y = row_y + max(0, (row_height - left_render.image.height) // 2)
-                canvas.paste(left_render.image, (rows_x + left_width - left_render.image.width, left_y), left_render.image)
+                self._composite_image(canvas, left_render.image, rows_x + left_width - left_render.image.width, left_y)
             if right_render is not None:
                 right_y = row_y + max(0, (row_height - right_render.image.height) // 2)
-                canvas.paste(right_render.image, (rows_x + left_width + gap_x, right_y), right_render.image)
+                self._composite_image(canvas, right_render.image, rows_x + left_width + gap_x, right_y)
             row_y += row_height + gap_y
 
         alpha = canvas.getchannel("A")
