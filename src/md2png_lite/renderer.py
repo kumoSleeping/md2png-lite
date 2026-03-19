@@ -15,6 +15,7 @@ from pygments import lex
 from pygments.lexers import TextLexer, get_lexer_by_name
 from pygments.styles import get_style_by_name
 
+from .emoji import EmojiAssetLoader, split_text_and_emoji
 from .model import (
     BlockNode,
     CodeBlock,
@@ -112,6 +113,13 @@ class _MathRender:
 
 
 @dataclass(frozen=True)
+class _EmojiRender:
+    image: Image.Image
+    ascent: int
+    descent: int
+
+
+@dataclass(frozen=True)
 class _RenderedCodeBlock:
     lines: list[_Line]
     line_numbers: list[str]
@@ -152,6 +160,8 @@ class PillowMarkdownRenderer:
         self._scratch_draw = ImageDraw.Draw(self._scratch_image)
         self._image_cache: dict[str, Image.Image | None] = {}
         self._math_cache: dict[tuple[str, int, str, bool], _MathRender | None] = {}
+        self._emoji_loader = EmojiAssetLoader()
+        self._emoji_cache: dict[tuple[str, int], Image.Image | None] = {}
         self._font_registry = FontRegistry(font_paths=font_paths, font_dirs=font_dirs, font_pack=font_pack)
         self._primary_fonts: dict[tuple[str, str, bool, bool], Any] = {}
 
@@ -791,49 +801,21 @@ class PillowMarkdownRenderer:
                 continue
             if isinstance(node, TextSpan):
                 fill = self.theme.link if node.style.link else color
-                for token in self._split_text_tokens(node.text):
-                    if not token:
-                        continue
-                    use_bold = bool(node.style.bold) or role == "heading"
-                    font = (
-                        self._heading_font_for_text(token, font_size, bold=use_bold, italic=node.style.italic)
-                        if role == "heading"
-                        else self._font_for_text(token, font_size, bold=node.style.bold, italic=node.style.italic)
-                    )
-                    runs.append(
-                        _Run(
-                            kind="text",
-                            text=token,
-                            font=font,
-                            fill=fill,
-                            width=self._text_width(font, token),
-                            height=self._font_metrics(font)[0] + self._font_metrics(font)[1],
-                            underline=bool(node.style.link),
-                            strike=node.style.strike,
-                            is_space=token.isspace(),
-                            ascent=self._font_metrics(font)[0],
-                            descent=self._font_metrics(font)[1],
-                        )
-                    )
+                self._append_text_runs(
+                    runs,
+                    node.text,
+                    font_size=font_size,
+                    color=fill,
+                    role=role,
+                    bold=bool(node.style.bold) or role == "heading",
+                    italic=bool(node.style.italic),
+                    underline=bool(node.style.link),
+                    strike=bool(node.style.strike),
+                )
                 continue
             if isinstance(node, CodeSpan):
                 text = str(node.text or "")
-                font = self._mono_or_text_font(text, max(12, int(font_size * 0.92)))
-                runs.append(
-                    _Run(
-                        kind="code",
-                        text=text,
-                        font=font,
-                        fill=self.theme.inline_code_foreground,
-                        background=self.theme.inline_code_background,
-                        width=self._text_width(font, text) + int(16 * self.scale),
-                        height=self._font_metrics(font)[0] + self._font_metrics(font)[1] + int(10 * self.scale),
-                        pad_x=int(8 * self.scale),
-                        pad_y=int(5 * self.scale),
-                        ascent=self._font_metrics(font)[0] + int(5 * self.scale),
-                        descent=self._font_metrics(font)[1] + int(5 * self.scale),
-                    )
-                )
+                runs.append(self._render_inline_code_span(text, font_size=max(12, int(font_size * 0.92))))
                 continue
             if isinstance(node, MathSpan):
                 rendered = self._render_math_image(node.latex, max(16, int(font_size * 1.04)), color, inline=True)
@@ -872,18 +854,12 @@ class PillowMarkdownRenderer:
                 loaded = self._load_image(node.source)
                 if loaded is None:
                     text = node.alt or "[image]"
-                    font = self._heading_font_for_text(text, font_size) if role == "heading" else self._font_for_text(text, font_size)
-                    runs.append(
-                        _Run(
-                            kind="text",
-                            text=text,
-                            font=font,
-                            fill=self.theme.muted,
-                            width=self._text_width(font, text),
-                            height=self._font_metrics(font)[0] + self._font_metrics(font)[1],
-                            ascent=self._font_metrics(font)[0],
-                            descent=self._font_metrics(font)[1],
-                        )
+                    self._append_text_runs(
+                        runs,
+                        text,
+                        font_size=font_size,
+                        color=self.theme.muted,
+                        role=role,
                     )
                 else:
                     target_height = int(font_size * 1.6)
@@ -1165,33 +1141,25 @@ class PillowMarkdownRenderer:
                 if chunk.endswith("\n"):
                     text = chunk[:-1]
                     if text:
-                        font = self._mono_or_text_font(text, self.fonts.code, bold=use_bold, italic=use_italic)
-                        raw_lines[-1].append(
-                            _Run(
-                                kind="text",
-                                text=text,
-                                font=font,
-                                fill=fill,
-                                width=self._text_width(font, text),
-                                height=self._font_metrics(font)[0] + self._font_metrics(font)[1],
-                                ascent=self._font_metrics(font)[0],
-                                descent=self._font_metrics(font)[1],
-                            )
+                        self._append_text_runs(
+                            raw_lines[-1],
+                            text,
+                            font_size=self.fonts.code,
+                            color=fill,
+                            role="code",
+                            bold=use_bold,
+                            italic=use_italic,
                         )
                     raw_lines.append([])
                 elif chunk:
-                    font = self._mono_or_text_font(chunk, self.fonts.code, bold=use_bold, italic=use_italic)
-                    raw_lines[-1].append(
-                        _Run(
-                            kind="text",
-                            text=chunk,
-                            font=font,
-                            fill=fill,
-                            width=self._text_width(font, chunk),
-                            height=self._font_metrics(font)[0] + self._font_metrics(font)[1],
-                            ascent=self._font_metrics(font)[0],
-                            descent=self._font_metrics(font)[1],
-                        )
+                    self._append_text_runs(
+                        raw_lines[-1],
+                        chunk,
+                        font_size=self.fonts.code,
+                        color=fill,
+                        role="code",
+                        bold=use_bold,
+                        italic=use_italic,
                     )
         if len(raw_lines) > 1 and not raw_lines[-1] and str(code or "").endswith("\n"):
             raw_lines.pop()
@@ -1319,6 +1287,150 @@ class PillowMarkdownRenderer:
         if (target_width, target_height) == src.size:
             return src
         return src.resize((target_width, target_height), Image.Resampling.LANCZOS)
+
+    def _append_text_runs(
+        self,
+        target: list[_Run],
+        text: str,
+        *,
+        font_size: int,
+        color: str,
+        role: str,
+        bold: bool = False,
+        italic: bool = False,
+        underline: bool = False,
+        strike: bool = False,
+    ) -> None:
+        for segment in split_text_and_emoji(text):
+            if segment.kind == "emoji":
+                emoji_run = self._emoji_run(
+                    segment.text,
+                    font_size=font_size,
+                    role=role,
+                    bold=bold,
+                    italic=italic,
+                )
+                if emoji_run is not None:
+                    target.append(emoji_run)
+                    continue
+            for token in self._split_text_tokens(segment.text):
+                if not token:
+                    continue
+                font = self._text_font_for_role(token, font_size, role=role, bold=bold, italic=italic)
+                ascent, descent = self._font_metrics(font)
+                target.append(
+                    _Run(
+                        kind="text",
+                        text=token,
+                        font=font,
+                        fill=color,
+                        width=self._text_width(font, token),
+                        height=ascent + descent,
+                        underline=underline,
+                        strike=strike,
+                        is_space=token.isspace(),
+                        ascent=ascent,
+                        descent=descent,
+                    )
+                )
+
+    def _emoji_run(
+        self,
+        sequence: str,
+        *,
+        font_size: int,
+        role: str,
+        bold: bool,
+        italic: bool,
+    ) -> _Run | None:
+        rendered = self._render_emoji(
+            sequence,
+            font_size=font_size,
+            role=role,
+            bold=bold,
+            italic=italic,
+        )
+        if rendered is None:
+            return None
+        return _Run(
+            kind="image",
+            width=rendered.image.width,
+            height=rendered.image.height,
+            image=rendered.image,
+            ascent=rendered.ascent,
+            descent=rendered.descent,
+        )
+
+    def _render_emoji(
+        self,
+        sequence: str,
+        *,
+        font_size: int,
+        role: str,
+        bold: bool,
+        italic: bool,
+    ) -> _EmojiRender | None:
+        reference_font = self._reference_font_for_role(role, font_size, bold=bold, italic=italic)
+        ref_ascent, ref_descent = self._font_metrics(reference_font)
+        target_height = max(1, int(round((ref_ascent + ref_descent) * 1.08)))
+        cache_key = (str(sequence or ""), int(target_height))
+        if cache_key not in self._emoji_cache:
+            source = self._emoji_loader.image_for_sequence(sequence)
+            self._emoji_cache[cache_key] = self._scale_image(source, height=target_height) if source is not None else None
+        image = self._emoji_cache.get(cache_key)
+        if image is None:
+            return None
+        total = max(1, ref_ascent + ref_descent)
+        ascent_ratio = ref_ascent / float(total)
+        ascent = max(1, min(image.height, int(round(image.height * ascent_ratio))))
+        return _EmojiRender(
+            image=image,
+            ascent=ascent,
+            descent=max(0, image.height - ascent),
+        )
+
+    def _render_inline_code_span(self, text: str, *, font_size: int) -> _Run:
+        content_runs: list[_Run] = []
+        self._append_text_runs(
+            content_runs,
+            text,
+            font_size=font_size,
+            color=self.theme.inline_code_foreground,
+            role="code",
+        )
+        default_font = self._mono_font(font_size)
+        default_ascent, default_descent = self._font_metrics(default_font)
+        line_ascent = max(default_ascent, max((run.ascent for run in content_runs), default=0))
+        line_descent = max(default_descent, max((run.descent for run in content_runs), default=0))
+        content_width = sum(run.width for run in content_runs)
+        pad_x = int(8 * self.scale)
+        pad_y = int(5 * self.scale)
+        total_width = max(1, content_width + pad_x * 2)
+        total_height = max(1, line_ascent + line_descent + pad_y * 2)
+        canvas = Image.new("RGBA", (total_width, total_height), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(canvas)
+        draw.rounded_rectangle(
+            (0, 0, total_width, total_height),
+            radius=max(4, int(6 * self.scale)),
+            fill=self.theme.inline_code_background,
+        )
+        baseline_y = pad_y + line_ascent
+        cursor_x = pad_x
+        for run in content_runs:
+            top = baseline_y - run.ascent
+            if run.kind == "image" and run.image is not None:
+                canvas.paste(run.image, (cursor_x, top), run.image)
+            elif run.font is not None:
+                draw.text((cursor_x, top), run.text, font=run.font, fill=run.fill or self.theme.inline_code_foreground)
+            cursor_x += run.width
+        return _Run(
+            kind="image",
+            width=total_width,
+            height=total_height,
+            image=canvas,
+            ascent=line_ascent + pad_y,
+            descent=line_descent + pad_y,
+        )
 
     def _text_width(self, font: ImageFont.ImageFont, text: str) -> int:
         if not text:
@@ -1716,6 +1828,32 @@ class PillowMarkdownRenderer:
         if self._font_registry.text_covered_by_entry(entry, text):
             return self._font_registry.font_from_entry(entry, max(12, int(size)))
         return self._font_registry.font_for_text(text, size=max(12, int(size)), role="mono", bold=bold, italic=italic)
+
+    def _text_font_for_role(
+        self,
+        text: str,
+        size: int,
+        *,
+        role: str,
+        bold: bool = False,
+        italic: bool = False,
+    ) -> ImageFont.ImageFont:
+        if role == "heading":
+            return self._heading_font_for_text(text, size, bold=bold, italic=italic)
+        if role == "code":
+            return self._mono_or_text_font(text, size, bold=bold, italic=italic)
+        return self._font_for_text(text, size, bold=bold, italic=italic)
+
+    def _reference_font_for_role(
+        self,
+        role: str,
+        size: int,
+        *,
+        bold: bool = False,
+        italic: bool = False,
+    ) -> ImageFont.ImageFont:
+        sample = "Mg" if role == "code" else "Hg"
+        return self._text_font_for_role(sample, size, role=role, bold=bold, italic=italic)
 
     @staticmethod
     def _split_text_tokens(text: str) -> list[str]:

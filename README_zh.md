@@ -16,6 +16,7 @@
 
 - 用 `markdown-it-py` + `dollarmath` 解析 Markdown，映射到一套小型文档模型，再直接在 Pillow 画布上排版标题、段落、表格、引用、图片和代码块。不走浏览器，也不走 HTML 截图。
 - 字体选择不是固定一套字体，而是按字形覆盖率挑选。它会自动发现系统字体和自定义字体，用 `matplotlib.ft2font` 评估覆盖率，先为正文、标题、代码挑主字体，再按文本片段对 CJK 和缺字做回退。
+- Emoji 会先按 Unicode 序列识别，再通过本地缓存的 Twemoji PNG 资产渲染，因此肤色修饰和常见 ZWJ 组合不依赖本机彩色字体是否可用。
 - 现在有两条清晰分开的字体路线：默认安装只走本机系统字体；可选的 `NotoSans` extra 会在首次渲染时把一套 curated Noto 字体同步到用户缓存目录，再在渲染时优先命中这套字体。
 - 公式通过 `matplotlib.mathtext` 渲染成透明位图，并做一层轻量 LaTeX 清洗；遇到不支持的语法时，再退化成可读文本。
 - 代码高亮由 `Pygments` 负责词法切分，换行和绘制则由渲染器自己完成，因此代码块不依赖浏览器 CSS/JS。
@@ -146,6 +147,7 @@ payload = render_markdown_image(markdown, font_pack="noto")
 - 支持通过 CLI 选择字体路线：`--font-pack auto|system|noto`
 - 支持通过 Provider 配置注入：`md2png_lite.font_paths`、`md2png_lite.font_dirs`、`md2png_lite.font_pack`
 - 支持通过环境变量注入：`MD2PNG_LITE_FONT_PATHS`、`MD2PNG_LITE_FONT_DIRS`、`MD2PNG_LITE_FONT_PACK`
+- 支持通过环境变量控制 emoji 缓存与来源：`MD2PNG_LITE_EMOJI_CACHE_DIR`、`MD2PNG_LITE_EMOJI_SOURCE`
 
 同步 Noto 字体许可证说明：
 

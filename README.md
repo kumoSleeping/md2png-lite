@@ -16,6 +16,7 @@ Pure Python Markdown renderer that outputs PNG images.
 
 - It parses Markdown with `markdown-it-py` + `dollarmath`, maps tokens into a small document model, then lays out headings, paragraphs, tables, quotes, images, and code blocks directly on a Pillow canvas. No browser and no HTML screenshot step.
 - Font selection is based on glyph coverage instead of one fixed font. It auto-discovers system/custom fonts, scores coverage with `matplotlib.ft2font`, preselects body/heading/code fonts, then falls back per text run for CJK and missing glyphs.
+- Emoji are detected as Unicode sequences and rendered through cached Twemoji PNG assets, so skin-tone modifiers and common ZWJ sequences do not depend on local color-font availability.
 - There are now two separate font routes: the default package stays on local system fonts, while the optional `NotoSans` extra syncs a curated Noto pack into a user cache directory and prefers that pack at render time.
 - Math is rendered with `matplotlib.mathtext` into transparent bitmaps, with a light LaTeX sanitizing pass and a readable plain-text fallback for unsupported syntax.
 - Syntax highlight comes from `Pygments` token streams, while wrapping and painting are handled by the renderer itself, so code blocks do not depend on browser CSS/JS.
@@ -146,6 +147,7 @@ Returned payload shape:
 - Supports route selection through CLI: `--font-pack auto|system|noto`
 - Supports provider config: `md2png_lite.font_paths`, `md2png_lite.font_dirs`, `md2png_lite.font_pack`
 - Supports environment variables: `MD2PNG_LITE_FONT_PATHS`, `MD2PNG_LITE_FONT_DIRS`, `MD2PNG_LITE_FONT_PACK`
+- Supports emoji cache control through environment variables: `MD2PNG_LITE_EMOJI_CACHE_DIR`, `MD2PNG_LITE_EMOJI_SOURCE`
 
 Synced Noto font license note:
 
