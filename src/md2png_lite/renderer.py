@@ -663,71 +663,42 @@ class PillowMarkdownRenderer:
         rendered = self._measure_code_block(block, width=width)
         if image is not None:
             draw = ImageDraw.Draw(image)
+            radius = max(4, int(6 * self.scale))
             draw.rounded_rectangle(
                 (x, y, x + width, y + rendered.height),
-                radius=max(8, int(10 * self.scale)),
+                radius=radius,
                 fill=self.theme.code_background,
+                outline=self.theme.border,
+                width=1,
             )
             if rendered.header_height > 0:
                 header_bottom = y + rendered.header_height
+                header_fill = self.theme.table_header_background
                 draw.rounded_rectangle(
                     (x, y, x + width, header_bottom),
-                    radius=max(8, int(10 * self.scale)),
-                    fill=self.theme.subtle,
+                    radius=radius,
+                    fill=header_fill,
                 )
                 draw.rectangle(
-                    (x, y + rendered.header_height // 2, x + width, header_bottom),
-                    fill=self.theme.subtle,
+                    (x, y + radius, x + width, header_bottom),
+                    fill=header_fill,
                 )
                 draw.line(
-                    (x + int(14 * self.scale), header_bottom, x + width - int(14 * self.scale), header_bottom),
+                    (x, header_bottom, x + width, header_bottom),
                     fill=self.theme.border,
-                    width=max(1, int(2 * self.scale)),
+                    width=1,
                 )
                 if rendered.language_label:
-                    label_font = self._font(max(12, int(self.fonts.code * 0.72)), role="mono", bold=True)
-                    label_width = self._text_width(label_font, rendered.language_label)
-                    pill_pad_x = int(10 * self.scale)
-                    pill_height = self._font_metrics(label_font)[0] + self._font_metrics(label_font)[1] + int(8 * self.scale)
-                    pill_width = label_width + pill_pad_x * 2
-                    pill_right = x + width - int(18 * self.scale)
-                    pill_left = pill_right - pill_width
-                    pill_top = y + max(int(8 * self.scale), (rendered.header_height - pill_height) // 2)
-                    pill_bottom = pill_top + pill_height
-                    draw.rounded_rectangle(
-                        (pill_left, pill_top, pill_right, pill_bottom),
-                        radius=max(6, int(8 * self.scale)),
-                        fill=self.theme.code_background,
-                    )
+                    label_font = self._mono_font(max(12, int(self.fonts.code * 0.68)))
+                    label_ascent, _ = self._font_metrics(label_font)
+                    label_x = x + rendered.pad_x + rendered.gutter_width + rendered.gutter_gap
+                    label_y = y + max(int(7 * self.scale), (rendered.header_height - label_ascent) // 2)
                     draw.text(
-                        (pill_left + pill_pad_x, pill_top + int(4 * self.scale)),
+                        (label_x, label_y),
                         rendered.language_label,
                         font=label_font,
                         fill=self.theme.muted,
                     )
-            gutter_left = x + rendered.pad_x - int(6 * self.scale)
-            gutter_right = x + rendered.pad_x + rendered.gutter_width + rendered.gutter_gap // 2
-            draw.rounded_rectangle(
-                (
-                    gutter_left,
-                    y + rendered.header_height + int(10 * self.scale),
-                    gutter_right,
-                    y + rendered.height - int(10 * self.scale),
-                ),
-                radius=max(6, int(8 * self.scale)),
-                fill=self.theme.subtle,
-            )
-            separator_x = x + rendered.pad_x + rendered.gutter_width + rendered.gutter_gap // 2
-            draw.line(
-                (
-                    separator_x,
-                    y + rendered.header_height + rendered.pad_top // 2,
-                    separator_x,
-                    y + rendered.height - rendered.pad_bottom // 2,
-                ),
-                fill=self.theme.border,
-                width=max(1, int(2 * self.scale)),
-            )
             self._draw_code_lines(
                 image,
                 rendered.lines,
@@ -748,9 +719,9 @@ class PillowMarkdownRenderer:
         header_height = int(34 * self.scale) if language_label else 0
         raw_code = str(block.code or "")
         line_count = max(1, len(raw_code.rstrip("\n").splitlines()) or 1)
-        line_number_font = self._font(max(12, int(self.fonts.code * 0.72)), role="mono")
-        gutter_width = self._text_width(line_number_font, "9" * len(str(line_count))) + int(14 * self.scale)
-        gutter_gap = int(16 * self.scale)
+        line_number_font = self._font(max(11, int(self.fonts.code * 0.62)), role="mono")
+        gutter_width = self._text_width(line_number_font, "9" * len(str(line_count))) + int(12 * self.scale)
+        gutter_gap = int(14 * self.scale)
         inner_width = max(120, width - pad_x * 2 - gutter_width - gutter_gap)
         lines, line_numbers = self._layout_code(raw_code, block.language, inner_width)
         height = self._lines_height(lines) + pad_top + pad_bottom + header_height
@@ -815,7 +786,13 @@ class PillowMarkdownRenderer:
                 continue
             if isinstance(node, CodeSpan):
                 text = str(node.text or "")
-                runs.append(self._render_inline_code_span(text, font_size=max(12, int(font_size * 0.92))))
+                runs.append(
+                    self._render_inline_code_span(
+                        text,
+                        font_size=max(12, int(font_size * 0.92)),
+                        max_width=width,
+                    )
+                )
                 continue
             if isinstance(node, MathSpan):
                 rendered = self._render_math_image(node.latex, max(16, int(font_size * 1.04)), color, inline=True)
@@ -892,6 +869,7 @@ class PillowMarkdownRenderer:
         default_height: int,
         default_ascent: int,
         default_descent: int,
+        preserve_leading_space: bool = False,
     ) -> list[_Line]:
         lines: list[_Line] = []
         current: list[_Run] = []
@@ -933,7 +911,7 @@ class PillowMarkdownRenderer:
                 _flush()
                 continue
             for run in self._split_run_to_fit(raw_run, width=width):
-                if run.is_space and not current:
+                if run.is_space and not current and not preserve_leading_space:
                     continue
                 if current and current_width + run.width > width:
                     leading = self._leading_no_line_start_punctuation(run.text if run.kind in {"text", "code"} else "")
@@ -1069,8 +1047,9 @@ class PillowMarkdownRenderer:
         draw = ImageDraw.Draw(image)
         cursor_y = y
         line_gap = int(8 * self.scale)
-        number_font = self._font(max(12, int(self.fonts.code * 0.72)), role="mono")
+        number_font = self._font(max(11, int(self.fonts.code * 0.62)), role="mono")
         number_ascent, _ = self._font_metrics(number_font)
+        number_fill = self._with_alpha(self.theme.muted, 214)
         for index, line in enumerate(lines):
             baseline_y = cursor_y + line.ascent
             label = str(line_numbers[index] or "") if index < len(line_numbers) else ""
@@ -1078,12 +1057,12 @@ class PillowMarkdownRenderer:
                 label_width = self._text_width(number_font, label)
                 draw.text(
                     (
-                        gutter_x + max(0, gutter_width - label_width - int(4 * self.scale)),
+                        gutter_x + max(0, gutter_width - label_width - int(2 * self.scale)),
                         baseline_y - number_ascent,
                     ),
                     label,
                     font=number_font,
-                    fill=self.theme.muted,
+                    fill=number_fill,
                 )
             cursor_x = x
             for run in line.runs:
@@ -1131,7 +1110,8 @@ class PillowMarkdownRenderer:
         mono_font = self._mono_font(self.fonts.code)
         mono_ascent, mono_descent = self._font_metrics(mono_font)
         raw_lines: list[list[_Run]] = [[]]
-        for token_type, value in lex(code or "", lexer):
+        normalized_code = str(code or "").replace("\t", "    ")
+        for token_type, value in lex(normalized_code, lexer):
             style_info = self._style_for_token(style, token_type)
             fill = "#" + style_info["color"] if style_info.get("color") else self.theme.foreground
             use_bold = bool(style_info.get("bold"))
@@ -1179,6 +1159,7 @@ class PillowMarkdownRenderer:
                 default_height=mono_ascent + mono_descent,
                 default_ascent=mono_ascent,
                 default_descent=mono_descent,
+                preserve_leading_space=True,
             )
             lines.extend(wrapped)
             line_numbers.append(str(line_index))
@@ -1407,7 +1388,7 @@ class PillowMarkdownRenderer:
             descent=max(0, image.height - ascent),
         )
 
-    def _render_inline_code_span(self, text: str, *, font_size: int) -> _Run:
+    def _render_inline_code_span(self, text: str, *, font_size: int, max_width: int | None = None) -> _Run:
         content_runs: list[_Run] = []
         self._append_text_runs(
             content_runs,
@@ -1418,13 +1399,21 @@ class PillowMarkdownRenderer:
         )
         default_font = self._mono_font(font_size)
         default_ascent, default_descent = self._font_metrics(default_font)
-        line_ascent = max(default_ascent, max((run.ascent for run in content_runs), default=0))
-        line_descent = max(default_descent, max((run.descent for run in content_runs), default=0))
-        content_width = sum(run.width for run in content_runs)
         pad_x = int(8 * self.scale)
         pad_y = int(5 * self.scale)
-        total_width = max(1, content_width + pad_x * 2)
-        total_height = max(1, line_ascent + line_descent + pad_y * 2)
+        available_width = max_width if max_width is not None and max_width > pad_x * 2 else None
+        line_width = max(1, available_width - pad_x * 2) if available_width is not None else max(1, sum(run.width for run in content_runs))
+        lines = self._wrap_runs(
+            content_runs,
+            width=line_width,
+            default_height=default_ascent + default_descent,
+            default_ascent=default_ascent,
+            default_descent=default_descent,
+        )
+        content_width = max((line.width for line in lines), default=0)
+        wrapped = len(lines) > 1
+        total_width = max(1, (available_width if wrapped and available_width is not None else content_width + pad_x * 2))
+        total_height = max(1, self._lines_height(lines) + pad_y * 2)
         canvas = Image.new("RGBA", (total_width, total_height), (255, 255, 255, 0))
         draw = ImageDraw.Draw(canvas)
         draw.rounded_rectangle(
@@ -1432,22 +1421,28 @@ class PillowMarkdownRenderer:
             radius=max(4, int(6 * self.scale)),
             fill=self.theme.inline_code_background,
         )
-        baseline_y = pad_y + line_ascent
-        cursor_x = pad_x
-        for run in content_runs:
-            top = baseline_y - run.ascent
-            if run.kind == "image" and run.image is not None:
-                self._composite_image(canvas, run.image, cursor_x, top)
-            elif run.font is not None:
-                draw.text((cursor_x, top), run.text, font=run.font, fill=run.fill or self.theme.inline_code_foreground)
-            cursor_x += run.width
+        self._draw_lines(
+            canvas,
+            lines,
+            x=pad_x,
+            y=pad_y,
+            color=self.theme.inline_code_foreground,
+        )
+        if wrapped:
+            ascent = total_height
+            descent = 0
+        else:
+            line_ascent = lines[0].ascent if lines else default_ascent
+            line_descent = lines[0].descent if lines else default_descent
+            ascent = line_ascent + pad_y
+            descent = line_descent + pad_y
         return _Run(
             kind="image",
             width=total_width,
             height=total_height,
             image=canvas,
-            ascent=line_ascent + pad_y,
-            descent=line_descent + pad_y,
+            ascent=ascent,
+            descent=descent,
         )
 
     def _text_width(self, font: ImageFont.ImageFont, text: str) -> int:
@@ -1808,6 +1803,11 @@ class PillowMarkdownRenderer:
             except Exception:
                 pass
         return (31, 41, 51)
+
+    @classmethod
+    def _with_alpha(cls, color: str, alpha: int) -> tuple[int, int, int, int]:
+        red, green, blue = cls._hex_to_rgb(color)
+        return (red, green, blue, max(0, min(255, int(alpha))))
 
     def _default_font_for_nodes(self, nodes: Sequence[InlineNode], *, font_size: int, role: str) -> ImageFont.ImageFont:
         sample_text = self._inline_text_content(nodes)
