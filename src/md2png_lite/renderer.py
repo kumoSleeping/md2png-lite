@@ -490,25 +490,29 @@ class PillowMarkdownRenderer:
                 spacing_after=int(18 * self.scale),
                 role="body",
             )
-        target = self._scale_image(loaded, width=width, max_height=int(560 * self.scale))
+        max_height = int(560 * self.scale)
+        target = self._scale_image(loaded, width=width, max_height=max_height)
+        # Browser-like baseline: use the image's intrinsic size unless it overflows.
+        # Reading optimization: standalone block images that are very small look lost on
+        # wide pages, so gently upscale them to a moderate width while preserving ratio.
+        if loaded.width <= width and loaded.height <= max_height:
+            readable_min_width = min(
+                width,
+                int(420 * self.scale),
+                int(loaded.width * 3),
+            )
+            if target.width < readable_min_width:
+                target = self._scale_image(
+                    loaded,
+                    width=readable_min_width,
+                    max_height=max_height,
+                    allow_upscale=True,
+                )
         if image is not None:
             paste_x = x + max(0, (width - target.width) // 2)
             self._composite_image(image, target, paste_x, y)
         cursor_y = y + target.height
-        if block.alt:
-            cursor_y = self._render_rich_text_block(
-                [TextSpan(text=block.alt)],
-                image=image,
-                x=x,
-                y=cursor_y + int(8 * self.scale),
-                width=width,
-                font_size=self.fonts.title,
-                color=self.theme.muted,
-                spacing_after=int(14 * self.scale),
-                role="heading",
-            )
-        else:
-            cursor_y += int(18 * self.scale)
+        cursor_y += int(18 * self.scale)
         return cursor_y
 
     def _render_table(self, block: TableBlock, *, image: Image.Image | None, x: int, y: int, width: int) -> int:
@@ -1245,13 +1249,14 @@ class PillowMarkdownRenderer:
         width: int | None = None,
         height: int | None = None,
         max_height: int | None = None,
+        allow_upscale: bool = False,
     ) -> Image.Image:
         src = image.copy()
         if width is None and height is None and max_height is None:
             return src
         target_width = src.width
         target_height = src.height
-        if width is not None and src.width > width:
+        if width is not None and (allow_upscale or src.width > width):
             ratio = width / float(src.width)
             target_width = int(src.width * ratio)
             target_height = int(src.height * ratio)
