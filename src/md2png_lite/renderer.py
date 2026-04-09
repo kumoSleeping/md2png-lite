@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 import httpx
-from PIL import Image, ImageChops, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from pygments import lex
 from pygments.lexers import TextLexer, get_lexer_by_name
 from pygments.styles import get_style_by_name
@@ -65,16 +65,11 @@ class _FontPalette:
     code: int = 24
     quote: int = 26
     title: int = 18
+    heading_bases: tuple[int, int, int, int, int, int] = (50, 42, 36, 32, 28, 26)
 
     def heading(self, level: int) -> int:
-        return {
-            1: 50,
-            2: 42,
-            3: 36,
-            4: 32,
-            5: 28,
-            6: 26,
-        }.get(level, 26)
+        index = min(max(int(level), 1), len(self.heading_bases)) - 1
+        return self.heading_bases[index]
 
 
 @dataclass
@@ -137,24 +132,28 @@ class PillowMarkdownRenderer:
     def __init__(
         self,
         *,
-        width: int = DEFAULT_PAGE_WIDTH,
-        padding: int = DEFAULT_PADDING,
+        width: int | None = None,
+        padding: int | None = None,
         theme: str = "paper",
         accent: str | None = None,
-        scale: float = DEFAULT_SCALE,
+        scale: float | None = None,
         font_paths: list[str] | None = None,
         font_dirs: list[str] | None = None,
         font_pack: str | None = None,
     ) -> None:
-        self.page_width = max(720, int(width))
-        self.padding = max(24, int(padding))
         self.theme = get_theme(theme, accent=accent)
-        self.scale = max(1.0, float(scale or 1.0))
+        resolved_width = self.theme.default_width if width is None or int(width) <= 0 else int(width)
+        resolved_padding = self.theme.default_padding if padding is None or int(padding) <= 0 else int(padding)
+        resolved_scale = self.theme.default_scale if scale is None or float(scale) <= 0 else float(scale)
+        self.page_width = max(self.theme.minimum_width, resolved_width)
+        self.padding = max(24, resolved_padding)
+        self.scale = max(1.0, resolved_scale)
         self.fonts = _FontPalette(
-            body=max(16, int(28 * self.scale)),
-            code=max(15, int(26 * self.scale)),
-            quote=max(16, int(26 * self.scale)),
-            title=max(12, int(18 * self.scale)),
+            body=max(16, int(self.theme.body_font_base * self.scale)),
+            code=max(15, int(self.theme.code_font_base * self.scale)),
+            quote=max(16, int(self.theme.quote_font_base * self.scale)),
+            title=max(12, int(self.theme.title_font_base * self.scale)),
+            heading_bases=tuple(max(14, int(size * self.scale)) for size in self.theme.heading_font_bases),
         )
         self._scratch_image = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
         self._scratch_draw = ImageDraw.Draw(self._scratch_image)
@@ -162,6 +161,7 @@ class PillowMarkdownRenderer:
         self._math_cache: dict[tuple[str, int, str, bool], _MathRender | None] = {}
         self._emoji_loader = EmojiAssetLoader()
         self._emoji_cache: dict[tuple[str, int], Image.Image | None] = {}
+        self._summary_cache: dict[str, tuple[BlockNode, ...]] = {}
         self._font_registry = FontRegistry(font_paths=font_paths, font_dirs=font_dirs, font_pack=font_pack)
         self._primary_fonts: dict[tuple[str, str, bool, bool], Any] = {}
 
@@ -243,15 +243,16 @@ class PillowMarkdownRenderer:
         width: int,
     ) -> int:
         if isinstance(block, Heading):
+            heading_width = self._heading_width(width, block.level)
             return self._render_rich_text_block(
                 block.children,
                 image=image,
                 x=x,
                 y=y,
-                width=width,
+                width=heading_width,
                 font_size=self.fonts.heading(block.level),
-                color=self.theme.accent if block.level <= 2 else self.theme.foreground,
-                spacing_after=int(24 * self.scale),
+                color=self.theme.heading_accent if block.level <= 2 else self.theme.heading_foreground,
+                spacing_after=self._scaled(self.theme.heading_spacing_base),
                 role="heading",
             )
         if isinstance(block, Paragraph):
@@ -263,7 +264,7 @@ class PillowMarkdownRenderer:
                 width=width,
                 font_size=self.fonts.body,
                 color=self.theme.foreground,
-                spacing_after=int(18 * self.scale),
+                spacing_after=self._scaled(self.theme.paragraph_spacing_base),
                 role="body",
             )
         if isinstance(block, Quote):
@@ -271,6 +272,8 @@ class PillowMarkdownRenderer:
         if isinstance(block, ListBlock):
             return self._render_list(block, image=image, x=x, y=y, width=width)
         if isinstance(block, CodeBlock):
+            if self._is_summary_code_block(block):
+                return self._render_summary_block(block, image=image, x=x, y=y, width=width)
             return self._render_code_block(block, image=image, x=x, y=y, width=width)
         if isinstance(block, Rule):
             return self._render_rule(image=image, x=x, y=y, width=width)
@@ -386,41 +389,131 @@ class PillowMarkdownRenderer:
             buckets.setdefault(role, []).append(chunk)
         return {role: " ".join(parts).strip() for role, parts in buckets.items() if parts}
 
+    def _scaled(self, base: int) -> int:
+        return max(0, int(base * self.scale))
+
+    def _line_gap_for_role(self, role: str) -> int:
+        if role == "heading":
+            return self._scaled(self.theme.heading_line_gap_base)
+        if role == "code":
+            return self._scaled(self.theme.code_line_gap_base)
+        return self._scaled(self.theme.body_line_gap_base)
+
+    def _heading_width(self, width: int, level: int) -> int:
+        index = min(max(int(level), 1), len(self.theme.heading_width_factors)) - 1
+        factor = float(self.theme.heading_width_factors[index] or 1.0)
+        return max(120, int(width * factor))
+
+    def _block_radius(self) -> int:
+        return self._scaled(self.theme.card_radius_base)
+
+    def _summary_radius(self) -> int:
+        return self._scaled(self.theme.summary_radius_base)
+
+    def _badge_radius(self) -> int:
+        return self._scaled(self.theme.badge_radius_base)
+
+    def _inline_code_radius(self) -> int:
+        return self._scaled(self.theme.inline_code_radius_base)
+
+    def _rounded_or_rect(
+        self,
+        draw: ImageDraw.ImageDraw,
+        box: tuple[int, int, int, int],
+        *,
+        radius: int,
+        fill: str | tuple[int, int, int, int] | None = None,
+        outline: str | tuple[int, int, int, int] | None = None,
+        width: int = 1,
+    ) -> None:
+        if radius > 0:
+            draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
+            return
+        draw.rectangle(box, fill=fill, outline=outline, width=width)
+
+    def _draw_shadow_panel(
+        self,
+        image: Image.Image,
+        box: tuple[int, int, int, int],
+        *,
+        radius: int,
+    ) -> None:
+        alpha = int(self.theme.card_shadow_alpha)
+        blur = self._scaled(self.theme.card_shadow_blur_base)
+        offset_y = self._scaled(self.theme.card_shadow_offset_y_base)
+        if alpha <= 0 or blur <= 0:
+            return
+        left, top, right, bottom = box
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        pad = blur * 2 + abs(offset_y) + 4
+        shadow = Image.new("RGBA", (width + pad * 2, height + pad * 2), (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow)
+        self._rounded_or_rect(
+            shadow_draw,
+            (pad, pad + offset_y, pad + width, pad + offset_y + height),
+            radius=radius,
+            fill=(0, 0, 0, alpha),
+        )
+        shadow = shadow.filter(ImageFilter.GaussianBlur(radius=max(1, blur)))
+        self._composite_image(image, shadow, left - pad, top - pad)
+
+    def _draw_panel(
+        self,
+        image: Image.Image,
+        box: tuple[int, int, int, int],
+        *,
+        radius: int,
+        fill: str,
+        outline: str | None = None,
+        outline_width: int = 1,
+    ) -> None:
+        self._draw_shadow_panel(image, box, radius=radius)
+        draw = ImageDraw.Draw(image)
+        self._rounded_or_rect(draw, box, radius=radius, fill=fill, outline=outline, width=outline_width)
+
     def _render_quote(self, block: Quote, *, image: Image.Image | None, x: int, y: int, width: int) -> int:
-        pad = int(18 * self.scale)
-        border = max(4, int(5 * self.scale))
+        border = max(3, self._scaled(5))
+        pad = self._scaled(16)
         inner_x = x + border + pad
-        inner_width = max(120, width - border - pad * 2)
-        content_top = y + pad
+        inner_width = max(120, width - border - pad)
+        content_top = y + (0 if self.theme.quote_style == "line" else pad)
         content_bottom = self._render_blocks(block.children, image=None, x=inner_x, y=content_top, width=inner_width)
         if block.children:
             content_bottom = max(content_top, content_bottom - self._block_trailing_margin(block.children[-1]))
         content_height = max(0, int(content_bottom - content_top))
-        total_height = max(content_height + pad * 2, int(52 * self.scale))
+        if self.theme.quote_style == "line":
+            total_height = max(content_height, self._scaled(28))
+        else:
+            total_height = max(content_height + pad * 2, self._scaled(52))
         if image is not None:
             draw = ImageDraw.Draw(image)
-            draw.rounded_rectangle(
-                (x, y, x + width, y + total_height),
-                radius=max(8, int(10 * self.scale)),
-                fill=self.theme.quote_background,
-            )
-            draw.rounded_rectangle(
+            if self.theme.quote_style != "line":
+                self._rounded_or_rect(
+                    draw,
+                    (x, y, x + width, y + total_height),
+                    radius=self._block_radius(),
+                    fill=self.theme.quote_background,
+                )
+            self._rounded_or_rect(
+                draw,
                 (x, y, x + border, y + total_height),
-                radius=max(4, int(6 * self.scale)),
+                radius=0,
                 fill=self.theme.quote_border,
             )
             self._render_blocks(block.children, image=image, x=inner_x, y=content_top, width=inner_width)
-        return y + total_height + int(18 * self.scale)
+        return y + total_height + self._scaled(self.theme.quote_spacing_base)
 
     def _render_list(self, block: ListBlock, *, image: Image.Image | None, x: int, y: int, width: int) -> int:
-        list_inset = int(18 * self.scale)
-        marker_gap = int(14 * self.scale)
-        marker_width = int(42 * self.scale)
+        list_inset = self._scaled(self.theme.list_inset_base)
+        marker_gap = self._scaled(self.theme.list_marker_gap_base)
+        marker_width = self._scaled(self.theme.list_marker_width_base)
         marker_x = x + list_inset
         body_x = marker_x + marker_width + marker_gap
         body_width = max(120, width - list_inset - marker_width - marker_gap)
         cursor_y = y
         marker_font = self._font(self.fonts.body, role="sans", bold=True)
+        ordered_fill = self.theme.ordered_marker_color or self.theme.foreground
         for idx, item in enumerate(block.items):
             item_top = cursor_y
             cursor_y = self._render_blocks(item.children, image=image, x=body_x, y=cursor_y, width=body_width)
@@ -430,21 +523,22 @@ class PillowMarkdownRenderer:
                     marker = f"{block.start + idx}."
                     marker_width_px = self._text_width(marker_font, marker)
                     draw.text(
-                        (marker_x + max(0, marker_width - marker_width_px), item_top + int(2 * self.scale)),
+                        (marker_x + max(0, marker_width - marker_width_px), item_top + self._scaled(1)),
                         marker,
                         font=marker_font,
-                        fill=self.theme.accent,
+                        fill=ordered_fill,
                     )
                 else:
-                    radius = max(4, int(5 * self.scale))
-                    cy = item_top + max(radius + 2, int(self._font_metrics(marker_font)[0] * 0.56))
+                    marker_size = max(6, self._scaled(self.theme.unordered_marker_size_base))
+                    cy = item_top + max(marker_size // 2 + 2, int(self._font_metrics(marker_font)[0] * 0.56))
                     cx = marker_x + marker_width // 2
-                    draw.ellipse(
-                        (cx - radius, cy - radius, cx + radius, cy + radius),
-                        fill=self.theme.accent,
-                    )
-            cursor_y += int(2 * self.scale)
-        return cursor_y + int(8 * self.scale)
+                    half = marker_size // 2
+                    if self.theme.unordered_marker_shape == "square":
+                        draw.rectangle((cx - half, cy - half, cx + half, cy + half), fill=self.theme.accent)
+                    else:
+                        draw.ellipse((cx - half, cy - half, cx + half, cy + half), fill=self.theme.accent)
+            cursor_y += self._scaled(1)
+        return cursor_y + self._scaled(self.theme.list_spacing_base)
 
     def _render_rule(self, *, image: Image.Image | None, x: int, y: int, width: int) -> int:
         mid_y = y + int(10 * self.scale)
@@ -464,16 +558,16 @@ class PillowMarkdownRenderer:
                 width=width,
                 font_size=self.fonts.body,
                 color=self.theme.foreground,
-                spacing_after=int(18 * self.scale),
+                spacing_after=self._scaled(self.theme.paragraph_spacing_base),
                 role="body",
             )
         if rendered.image.width > width:
             rendered = self._scale_math_render(rendered, width / float(rendered.image.width))
-        box_y = y + int(8 * self.scale)
+        box_y = y + self._scaled(8)
         if image is not None:
             paste_x = x + max(0, (width - rendered.image.width) // 2)
             self._composite_image(image, rendered.image, paste_x, box_y)
-        return box_y + rendered.image.height + int(20 * self.scale)
+        return box_y + rendered.image.height + self._scaled(20)
 
     def _render_image_block(self, block: ImageBlock, *, image: Image.Image | None, x: int, y: int, width: int) -> int:
         loaded = self._load_image(block.source)
@@ -487,7 +581,7 @@ class PillowMarkdownRenderer:
                 width=width,
                 font_size=self.fonts.body,
                 color=self.theme.muted,
-                spacing_after=int(18 * self.scale),
+                spacing_after=self._scaled(self.theme.image_spacing_base),
                 role="body",
             )
         max_height = int(560 * self.scale)
@@ -512,7 +606,7 @@ class PillowMarkdownRenderer:
             paste_x = x + max(0, (width - target.width) // 2)
             self._composite_image(image, target, paste_x, y)
         cursor_y = y + target.height
-        cursor_y += int(18 * self.scale)
+        cursor_y += self._scaled(self.theme.image_spacing_base)
         return cursor_y
 
     def _render_table(self, block: TableBlock, *, image: Image.Image | None, x: int, y: int, width: int) -> int:
@@ -524,8 +618,8 @@ class PillowMarkdownRenderer:
             return y
 
         gap = 0
-        cell_pad_x = int(12 * self.scale)
-        cell_pad_y = int(10 * self.scale)
+        cell_pad_x = self._scaled(self.theme.table_cell_pad_x_base)
+        cell_pad_y = self._scaled(self.theme.table_cell_pad_y_base)
         column_widths = self._table_column_widths(block, total_width=width - gap * (column_count + 1), min_width=max(80, int(88 * self.scale)))
 
         rows: list[tuple[bool, list[list[InlineNode]]]] = []
@@ -548,20 +642,20 @@ class PillowMarkdownRenderer:
                     color=self.theme.foreground,
                 )
                 rendered_cells.append(lines)
-                height = self._lines_height(lines) + cell_pad_y * 2
+                height = self._lines_height(lines, line_gap=self._line_gap_for_role("body")) + cell_pad_y * 2
                 measured.append(max(height, int(34 * self.scale)))
             measured_rows.append((is_header, max(measured), rendered_cells))
 
         total_height = sum(row_height for _, row_height, _ in measured_rows) + gap * max(0, len(measured_rows) - 1)
         if image is not None and measured_rows:
             draw = ImageDraw.Draw(image)
-            radius = max(4, int(6 * self.scale))
-            draw.rounded_rectangle(
+            radius = self._block_radius()
+            self._draw_panel(
+                image,
                 (x, y, x + width, y + total_height),
                 radius=radius,
                 fill=self.theme.table_row_background,
                 outline=self.theme.border,
-                width=1,
             )
 
             cursor_y = y
@@ -573,13 +667,15 @@ class PillowMarkdownRenderer:
                     self.theme.table_alt_background if row_index % 2 else self.theme.table_row_background
                 )
                 if row_index == 0 and row_index == last_row_index:
-                    draw.rounded_rectangle((x, row_top, x + width, row_bottom), radius=radius, fill=fill)
+                    self._rounded_or_rect(draw, (x, row_top, x + width, row_bottom), radius=radius, fill=fill)
                 elif row_index == 0:
-                    draw.rounded_rectangle((x, row_top, x + width, row_bottom), radius=radius, fill=fill)
-                    draw.rectangle((x, row_top + radius, x + width, row_bottom), fill=fill)
+                    self._rounded_or_rect(draw, (x, row_top, x + width, row_bottom), radius=radius, fill=fill)
+                    if radius > 0:
+                        draw.rectangle((x, row_top + radius, x + width, row_bottom), fill=fill)
                 elif row_index == last_row_index:
-                    draw.rounded_rectangle((x, row_top, x + width, row_bottom), radius=radius, fill=fill)
-                    draw.rectangle((x, row_top, x + width, row_bottom - radius), fill=fill)
+                    self._rounded_or_rect(draw, (x, row_top, x + width, row_bottom), radius=radius, fill=fill)
+                    if radius > 0:
+                        draw.rectangle((x, row_top, x + width, row_bottom - radius), fill=fill)
                 else:
                     draw.rectangle((x, row_top, x + width, row_bottom), fill=fill)
 
@@ -599,6 +695,7 @@ class PillowMarkdownRenderer:
                         x=cell_x + cell_pad_x,
                         y=row_top + cell_pad_y,
                         color=self.theme.foreground,
+                        line_gap=self._line_gap_for_role("body"),
                     )
                     cell_cursor_x += cell_width
                 if row_index < last_row_index:
@@ -606,25 +703,25 @@ class PillowMarkdownRenderer:
                 cursor_y = row_bottom + gap
         else:
             cursor_y = y + total_height
-        return cursor_y + int(16 * self.scale)
+        return cursor_y + self._scaled(self.theme.table_spacing_base)
 
     def _block_trailing_margin(self, block: BlockNode) -> int:
         if isinstance(block, Heading):
-            return int(24 * self.scale)
+            return self._scaled(self.theme.heading_spacing_base)
         if isinstance(block, Paragraph):
-            return int(18 * self.scale)
+            return self._scaled(self.theme.paragraph_spacing_base)
         if isinstance(block, Quote):
-            return int(18 * self.scale)
+            return self._scaled(self.theme.quote_spacing_base)
         if isinstance(block, ListBlock):
-            return int(8 * self.scale)
+            return self._scaled(self.theme.list_spacing_base)
         if isinstance(block, CodeBlock):
-            return int(18 * self.scale)
+            return self._scaled(self.theme.summary_spacing_base if self._is_summary_code_block(block) else self.theme.code_spacing_base)
         if isinstance(block, TableBlock):
-            return int(16 * self.scale)
+            return self._scaled(self.theme.table_spacing_base)
         if isinstance(block, MathBlock):
-            return int(20 * self.scale)
+            return self._scaled(20)
         if isinstance(block, ImageBlock):
-            return int(14 * self.scale) if block.alt else int(18 * self.scale)
+            return self._scaled(14 if block.alt else self.theme.image_spacing_base)
         return 0
 
     def _table_column_widths(self, block: TableBlock, *, total_width: int, min_width: int) -> list[int]:
@@ -663,33 +760,86 @@ class PillowMarkdownRenderer:
                     break
         return widths
 
+    @staticmethod
+    def _is_summary_code_block(block: CodeBlock) -> bool:
+        return str(block.language or "").strip().lower() in {"summary", "摘要"}
+
+    def _summary_children(self, block: CodeBlock) -> tuple[BlockNode, ...]:
+        raw = str(block.code or "").strip("\n")
+        cached = self._summary_cache.get(raw)
+        if cached is not None:
+            return cached
+        children = tuple(parse_markdown_document(raw).children) if raw else ()
+        self._summary_cache[raw] = children
+        return children
+
+    def _render_summary_block(self, block: CodeBlock, *, image: Image.Image | None, x: int, y: int, width: int) -> int:
+        pad_x = self._scaled(self.theme.summary_pad_x_base)
+        pad_top = self._scaled(self.theme.summary_pad_top_base)
+        pad_bottom = self._scaled(self.theme.summary_pad_bottom_base)
+        badge_pad_x = self._scaled(self.theme.summary_badge_pad_x_base)
+        badge_pad_y = self._scaled(self.theme.summary_badge_pad_y_base)
+        badge_gap = self._scaled(self.theme.summary_badge_gap_base)
+        badge_font = self._mono_font(max(12, int(self.fonts.code * 0.58)))
+        badge_text = "SUMMARY"
+        badge_ascent, badge_descent = self._font_metrics(badge_font)
+        badge_width = self._text_width(badge_font, badge_text) + badge_pad_x * 2
+        badge_height = badge_ascent + badge_descent + badge_pad_y * 2
+        body_x = x + pad_x
+        body_y = y + pad_top + badge_height + badge_gap
+        body_width = max(120, width - pad_x * 2)
+        children = self._summary_children(block)
+        body_bottom = self._render_blocks(children, image=None, x=body_x, y=body_y, width=body_width) if children else body_y
+        total_height = max(body_bottom - y + pad_bottom, pad_top + badge_height + pad_bottom)
+
+        if image is not None:
+            self._draw_panel(
+                image,
+                (x, y, x + width, y + total_height),
+                radius=self._summary_radius(),
+                fill=self.theme.summary_background,
+                outline=self.theme.summary_border,
+            )
+            draw = ImageDraw.Draw(image)
+            badge_x = x + pad_x + self._scaled(self.theme.summary_badge_offset_x_base)
+            badge_y = y + pad_top + self._scaled(self.theme.summary_badge_offset_y_base)
+            self._rounded_or_rect(
+                draw,
+                (badge_x, badge_y, badge_x + badge_width, badge_y + badge_height),
+                radius=self._badge_radius(),
+                fill=self.theme.summary_badge_background,
+            )
+            draw.text(
+                (badge_x + badge_pad_x, badge_y + badge_pad_y),
+                badge_text,
+                font=badge_font,
+                fill=self.theme.summary_badge_foreground,
+            )
+            if children:
+                self._render_blocks(children, image=image, x=body_x, y=body_y, width=body_width)
+        return y + total_height + self._scaled(self.theme.summary_spacing_base)
+
     def _render_code_block(self, block: CodeBlock, *, image: Image.Image | None, x: int, y: int, width: int) -> int:
         rendered = self._measure_code_block(block, width=width)
         if image is not None:
             draw = ImageDraw.Draw(image)
-            radius = max(4, int(6 * self.scale))
-            draw.rounded_rectangle(
+            radius = self._block_radius()
+            self._draw_panel(
+                image,
                 (x, y, x + width, y + rendered.height),
                 radius=radius,
                 fill=self.theme.code_background,
-                outline=self.theme.border,
-                width=1,
+                outline=self.theme.code_border,
             )
             if rendered.header_height > 0:
                 header_bottom = y + rendered.header_height
                 header_fill = self.theme.table_header_background
-                draw.rounded_rectangle(
-                    (x, y, x + width, header_bottom),
-                    radius=radius,
-                    fill=header_fill,
-                )
-                draw.rectangle(
-                    (x, y + radius, x + width, header_bottom),
-                    fill=header_fill,
-                )
+                self._rounded_or_rect(draw, (x, y, x + width, header_bottom), radius=radius, fill=header_fill)
+                if radius > 0:
+                    draw.rectangle((x, y + radius, x + width, header_bottom), fill=header_fill)
                 draw.line(
                     (x, header_bottom, x + width, header_bottom),
-                    fill=self.theme.border,
+                    fill=self.theme.code_border,
                     width=1,
                 )
                 if rendered.language_label:
@@ -712,23 +862,24 @@ class PillowMarkdownRenderer:
                 x=x + rendered.pad_x + rendered.gutter_width + rendered.gutter_gap,
                 y=y + rendered.header_height + rendered.pad_top,
                 color=self.theme.foreground,
+                line_gap=self._line_gap_for_role("code"),
             )
-        return y + rendered.height + int(18 * self.scale)
+        return y + rendered.height + self._scaled(self.theme.code_spacing_base)
 
     def _measure_code_block(self, block: CodeBlock, *, width: int) -> _RenderedCodeBlock:
-        pad_x = int(18 * self.scale)
-        pad_top = int(20 * self.scale)
-        pad_bottom = int(13 * self.scale)
+        pad_x = self._scaled(self.theme.code_pad_x_base)
+        pad_top = self._scaled(self.theme.code_pad_top_base)
+        pad_bottom = self._scaled(self.theme.code_pad_bottom_base)
         language_label = str(block.language or "").strip().lower()
-        header_height = int(34 * self.scale) if language_label else 0
+        header_height = self._scaled(self.theme.code_header_height_base) if language_label else 0
         raw_code = str(block.code or "")
         line_count = max(1, len(raw_code.rstrip("\n").splitlines()) or 1)
         line_number_font = self._font(max(11, int(self.fonts.code * 0.62)), role="mono")
-        gutter_width = self._text_width(line_number_font, "9" * len(str(line_count))) + int(12 * self.scale)
-        gutter_gap = int(14 * self.scale)
+        gutter_width = self._text_width(line_number_font, "9" * len(str(line_count))) + self._scaled(self.theme.code_gutter_pad_base)
+        gutter_gap = self._scaled(self.theme.code_gutter_gap_base)
         inner_width = max(120, width - pad_x * 2 - gutter_width - gutter_gap)
         lines, line_numbers = self._layout_code(raw_code, block.language, inner_width)
-        height = self._lines_height(lines) + pad_top + pad_bottom + header_height
+        height = self._lines_height(lines, line_gap=self._line_gap_for_role("code")) + pad_top + pad_bottom + header_height
         return _RenderedCodeBlock(
             lines=lines,
             line_numbers=line_numbers,
@@ -757,8 +908,8 @@ class PillowMarkdownRenderer:
     ) -> int:
         lines = self._layout_inline_nodes(nodes, width=width, font_size=font_size, color=color, role=role)
         if image is not None:
-            self._draw_lines(image, lines, x=x, y=y, color=color)
-        return y + self._lines_height(lines) + spacing_after
+            self._draw_lines(image, lines, x=x, y=y, color=color, line_gap=self._line_gap_for_role(role))
+        return y + self._lines_height(lines, line_gap=self._line_gap_for_role(role)) + spacing_after
 
     def _layout_inline_nodes(
         self,
@@ -996,10 +1147,18 @@ class PillowMarkdownRenderer:
             return 0
         return self._text_width(run.font, text)
 
-    def _draw_lines(self, image: Image.Image, lines: Sequence[_Line], *, x: int, y: int, color: str) -> None:
+    def _draw_lines(
+        self,
+        image: Image.Image,
+        lines: Sequence[_Line],
+        *,
+        x: int,
+        y: int,
+        color: str,
+        line_gap: int,
+    ) -> None:
         draw = ImageDraw.Draw(image)
         cursor_y = y
-        line_gap = int(8 * self.scale)
         for line in lines:
             cursor_x = x
             baseline_y = cursor_y + line.ascent
@@ -1009,9 +1168,10 @@ class PillowMarkdownRenderer:
                     self._composite_image(image, run.image, cursor_x, top)
                 elif run.font is not None:
                     if run.background:
-                        draw.rounded_rectangle(
+                        self._rounded_or_rect(
+                            draw,
                             (cursor_x, top, cursor_x + run.width, top + run.height),
-                            radius=max(4, int(6 * self.scale)),
+                            radius=self._inline_code_radius(),
                             fill=run.background,
                         )
                     text_x = cursor_x + run.pad_x
@@ -1047,10 +1207,10 @@ class PillowMarkdownRenderer:
         x: int,
         y: int,
         color: str,
+        line_gap: int,
     ) -> None:
         draw = ImageDraw.Draw(image)
         cursor_y = y
-        line_gap = int(8 * self.scale)
         number_font = self._font(max(11, int(self.fonts.code * 0.62)), role="mono")
         number_ascent, _ = self._font_metrics(number_font)
         number_fill = self._with_alpha(self.theme.muted, 214)
@@ -1075,9 +1235,10 @@ class PillowMarkdownRenderer:
                     self._composite_image(image, run.image, cursor_x, top)
                 elif run.font is not None:
                     if run.background:
-                        draw.rounded_rectangle(
+                        self._rounded_or_rect(
+                            draw,
                             (cursor_x, top, cursor_x + run.width, top + run.height),
-                            radius=max(4, int(6 * self.scale)),
+                            radius=self._inline_code_radius(),
                             fill=run.background,
                         )
                     text_x = cursor_x + run.pad_x
@@ -1102,11 +1263,10 @@ class PillowMarkdownRenderer:
                 cursor_x += run.width
             cursor_y += line.height + line_gap
 
-    def _lines_height(self, lines: Sequence[_Line]) -> int:
+    def _lines_height(self, lines: Sequence[_Line], *, line_gap: int) -> int:
         if not lines:
             return 0
-        gap = int(8 * self.scale)
-        return sum(line.height for line in lines) + gap * max(0, len(lines) - 1)
+        return sum(line.height for line in lines) + line_gap * max(0, len(lines) - 1)
 
     def _layout_code(self, code: str, language: str, width: int) -> tuple[list[_Line], list[str]]:
         lexer = self._code_lexer(language)
@@ -1404,8 +1564,8 @@ class PillowMarkdownRenderer:
         )
         default_font = self._mono_font(font_size)
         default_ascent, default_descent = self._font_metrics(default_font)
-        pad_x = int(8 * self.scale)
-        pad_y = int(5 * self.scale)
+        pad_x = self._scaled(self.theme.inline_code_pad_x_base)
+        pad_y = self._scaled(self.theme.inline_code_pad_y_base)
         available_width = max_width if max_width is not None and max_width > pad_x * 2 else None
         line_width = max(1, available_width - pad_x * 2) if available_width is not None else max(1, sum(run.width for run in content_runs))
         lines = self._wrap_runs(
@@ -1418,12 +1578,13 @@ class PillowMarkdownRenderer:
         content_width = max((line.width for line in lines), default=0)
         wrapped = len(lines) > 1
         total_width = max(1, (available_width if wrapped and available_width is not None else content_width + pad_x * 2))
-        total_height = max(1, self._lines_height(lines) + pad_y * 2)
+        total_height = max(1, self._lines_height(lines, line_gap=self._line_gap_for_role("code")) + pad_y * 2)
         canvas = Image.new("RGBA", (total_width, total_height), (255, 255, 255, 0))
         draw = ImageDraw.Draw(canvas)
-        draw.rounded_rectangle(
+        self._rounded_or_rect(
+            draw,
             (0, 0, total_width, total_height),
-            radius=max(4, int(6 * self.scale)),
+            radius=self._inline_code_radius(),
             fill=self.theme.inline_code_background,
         )
         self._draw_lines(
@@ -1432,6 +1593,7 @@ class PillowMarkdownRenderer:
             x=pad_x,
             y=pad_y,
             color=self.theme.inline_code_foreground,
+            line_gap=self._line_gap_for_role("code"),
         )
         if wrapped:
             ascent = total_height
@@ -1948,9 +2110,9 @@ def render_markdown_image(
     title: str = "Markdown Render",
     theme: str = "paper",
     accent: str | None = None,
-    width: int = DEFAULT_PAGE_WIDTH,
-    padding: int = DEFAULT_PADDING,
-    scale: float = DEFAULT_SCALE,
+    width: int | None = None,
+    padding: int | None = None,
+    scale: float | None = None,
     font_paths: list[str] | None = None,
     font_dirs: list[str] | None = None,
     font_pack: str | None = None,

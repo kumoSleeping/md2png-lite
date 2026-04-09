@@ -3,7 +3,23 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .renderer import DEFAULT_PADDING, DEFAULT_PAGE_WIDTH, DEFAULT_SCALE, render_markdown_image
+from .renderer import render_markdown_image
+
+
+def _optional_int(*values: Any) -> int | None:
+    for value in values:
+        if value in (None, "", 0):
+            continue
+        return int(value)
+    return None
+
+
+def _optional_float(*values: Any) -> float | None:
+    for value in values:
+        if value in (None, "", 0, 0.0):
+            continue
+        return float(value)
+    return None
 
 
 async def render_md2png_lite_result(
@@ -19,20 +35,17 @@ async def render_md2png_lite_result(
         or (render_cfg.get("theme") if isinstance(render_cfg, dict) else "")
         or "paper"
     ).strip() or "paper"
-    width = int(
-        kwargs.get("width")
-        or (render_cfg.get("width") if isinstance(render_cfg, dict) else 0)
-        or DEFAULT_PAGE_WIDTH
+    width = _optional_int(
+        kwargs.get("width"),
+        render_cfg.get("width") if isinstance(render_cfg, dict) else None,
     )
-    padding = int(
-        kwargs.get("padding")
-        or (render_cfg.get("padding") if isinstance(render_cfg, dict) else 0)
-        or DEFAULT_PADDING
+    padding = _optional_int(
+        kwargs.get("padding"),
+        render_cfg.get("padding") if isinstance(render_cfg, dict) else None,
     )
-    scale = float(
-        kwargs.get("scale")
-        or (render_cfg.get("scale") if isinstance(render_cfg, dict) else 0)
-        or DEFAULT_SCALE
+    scale = _optional_float(
+        kwargs.get("scale"),
+        render_cfg.get("scale") if isinstance(render_cfg, dict) else None,
     )
     font_paths = kwargs.get("font_paths")
     if not isinstance(font_paths, list):
