@@ -50,6 +50,22 @@ pip install 'md2png-lite[NotoSans]'
 uv run md2png-lite input.md -o output.png --theme paper
 ```
 
+也可以直接使用手机摘要主题，它会自动带上主题默认的宽度、留白和字号：
+
+```bash
+uv run md2png-lite input.md -o output.png --theme mobile-summary
+```
+
+如果你想把图片内容直接串行返回给别的脚本，而不是写文件：
+
+```bash
+uv run md2png-lite input.md --stdout-format base64
+uv run md2png-lite input.md --stdout-format json
+```
+
+- `base64`：只输出 PNG 的 base64 内容，适合 shell / Python 再解码
+- `json`：输出完整 payload，包含 `ok`、`renderer`、`mime_type`、`base64`
+
 调用时可以显式选择字体路线：
 
 ```bash
@@ -100,6 +116,7 @@ payload = render_markdown_image("# Hello\n\n```python\nprint('hi')\n```")
 ```python
 payload = render_markdown_image(markdown, font_pack="system")
 payload = render_markdown_image(markdown, font_pack="noto")
+payload = render_markdown_image(markdown, theme="mobile-summary")
 ```
 
 返回值格式：
@@ -121,6 +138,7 @@ payload = render_markdown_image(markdown, font_pack="noto")
 - 引用块
 - 分割线
 - 围栏代码块
+- 自定义 `summary` 围栏块，会渲染成摘要卡片
 - 行内代码
 - 表格
 - 链接 / 斜体 / 粗体 / 删除线
@@ -134,6 +152,7 @@ payload = render_markdown_image(markdown, font_pack="noto")
 - `github-dark`：GitHub 风格暗色主题
 - `solarized-light`：经典 Solarized Light
 - `graphite`：现有的深色编辑感主题
+- `mobile-summary`：手机友好的摘要主题，大字号、窄版式、主基底为 `#f2f2f2`
 
 ## 字体发现
 

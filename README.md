@@ -50,6 +50,22 @@ The `NotoSans` extra does not embed fonts into the wheel. It installs the sync h
 uv run md2png-lite input.md -o output.png --theme paper
 ```
 
+Use the mobile summary preset with theme-driven width / padding / scale defaults:
+
+```bash
+uv run md2png-lite input.md -o output.png --theme mobile-summary
+```
+
+If you want serialized image content on stdout instead of a file:
+
+```bash
+uv run md2png-lite input.md --stdout-format base64
+uv run md2png-lite input.md --stdout-format json
+```
+
+- `base64`: prints only the PNG base64 payload
+- `json`: prints the full payload with `ok`, `renderer`, `mime_type`, and `base64`
+
 Choose the font route explicitly at call time:
 
 ```bash
@@ -100,6 +116,7 @@ Choose the route per call:
 ```python
 payload = render_markdown_image(markdown, font_pack="system")
 payload = render_markdown_image(markdown, font_pack="noto")
+payload = render_markdown_image(markdown, theme="mobile-summary")
 ```
 
 Returned payload shape:
@@ -121,6 +138,7 @@ Returned payload shape:
 - Block quotes
 - Horizontal rules
 - Fenced code blocks
+- Custom `summary` fenced blocks rendered as editorial summary cards
 - Inline code
 - Tables
 - Links / emphasis / strong / strikethrough
@@ -134,6 +152,7 @@ Returned payload shape:
 - `github-dark`: GitHub-like dark theme
 - `solarized-light`: classic Solarized light theme
 - `graphite`: existing dark editorial theme
+- `mobile-summary`: phone-friendly editorial summary theme with large type and neutral `#f2f2f2` surfaces
 
 ## Font discovery
 

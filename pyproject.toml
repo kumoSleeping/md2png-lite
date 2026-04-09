@@ -1,6 +1,6 @@
 [project]
 name = "md2png-lite"
-version = "0.2.2"
+version = "0.2.3"
 description = "Browser-free Markdown to PNG renderer in pure Python"
 readme = "README.md"
 license = { file = "LICENSE" }
